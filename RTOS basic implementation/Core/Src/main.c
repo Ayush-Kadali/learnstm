@@ -74,7 +74,30 @@ const osThreadAttr_t idleTask_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for ascentTask */
+osThreadId_t ascentTaskHandle;
+const osThreadAttr_t ascentTask_attributes = {
+  .name = "ascentTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for descentTask */
+osThreadId_t descentTaskHandle;
+const osThreadAttr_t descentTask_attributes = {
+  .name = "descentTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for recoveryTask */
+osThreadId_t recoveryTaskHandle;
+const osThreadAttr_t recoveryTask_attributes = {
+  .name = "recoveryTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
+volatile uint32_t buttonPressTime = 0; // Tracks button press time
+volatile uint8_t buttonPressed = 0;   // Tracks if button was pressed
 
 /* USER CODE END PV */
 
@@ -87,6 +110,9 @@ void StartDefaultTask(void *argument);
 void StartUartTask(void *argument);
 void StartBootTask(void *argument);
 void StartIdleTask(void *argument);
+void StartAscentTask(void *argument);
+void StartDescentTask(void *argument);
+void StartRecoveryTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -112,6 +138,55 @@ int __io_putchar(int ch) {
     HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
     return ch;
 }
+
+
+uint8_t isButtonPressed()
+{
+    return (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET);
+}
+
+void handleButtonPress()
+{
+    if (isButtonPressed())
+    {
+        if (!buttonPressed) // If button was not already pressed
+        {
+            buttonPressTime = HAL_GetTick();
+            buttonPressed = 1;
+        }
+    }
+    else
+    {
+        if (buttonPressed && HAL_GetTick() - buttonPressTime >= 2000) // 2-second press
+        {
+            if (systemState == BOOT)
+            {
+                systemState = IDLE; // Transition from BOOT to IDLE
+            }
+        }
+        else if (buttonPressed && HAL_GetTick() - buttonPressTime < 2000) // Single press
+        {
+            if (systemState == IDLE)
+            {
+                systemState = TELEMETRY;
+            }
+            else if (systemState == TELEMETRY)
+            {
+                systemState = ASCENT;
+            }
+            else if (systemState == ASCENT)
+            {
+                systemState = DESCENT;
+            }
+            else if (systemState == DESCENT)
+            {
+                systemState = RECOVERY;
+            }
+        }
+        buttonPressed = 0; // Reset button state
+    }
+}
+
 
 /* USER CODE END 0 */
 
@@ -181,6 +256,15 @@ int main(void)
 
   /* creation of idleTask */
   idleTaskHandle = osThreadNew(StartIdleTask, NULL, &idleTask_attributes);
+
+  /* creation of ascentTask */
+  ascentTaskHandle = osThreadNew(StartAscentTask, NULL, &ascentTask_attributes);
+
+  /* creation of descentTask */
+  descentTaskHandle = osThreadNew(StartDescentTask, NULL, &descentTask_attributes);
+
+  /* creation of recoveryTask */
+  recoveryTaskHandle = osThreadNew(StartRecoveryTask, NULL, &recoveryTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -374,21 +458,21 @@ void StartDefaultTask(void *argument)
 void StartUartTask(void *argument)
 {
   /* USER CODE BEGIN StartUartTask */
-	const char *telemetryMessage = "Telemetry Data\r\n";
+	  const char *telemetryMessage = "Telemetry Data\r\n";
 
   /* Infinite loop */
   for(;;)
   {
-	    if (systemState == TELEMETRY)
+	    handleButtonPress();
+
+	    if (systemState == TELEMETRY) // Telemetry state
 	    {
-	      // Send telemetry when in TELEMETRY state
-	    	printf(telemetryMessage);
-//	      HAL_UART_Transmit(&huart2, (uint8_t *)telemetryMessage, strlen(telemetryMessage), HAL_MAX_DELAY);
-			osDelay(1000); // Send every second
+	      printf(telemetryMessage);
+	      osDelay(1000); // Send telemetry every second
 	    }
 	    else
 	    {
-	      osDelay(100); // Check state periodically
+	      osDelay(100); // Check periodically
 	    }
 
   }
@@ -406,17 +490,24 @@ void StartBootTask(void *argument)
 {
   /* USER CODE BEGIN StartBootTask */
 	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET); // Example: Reset an LED
+    printf("Boot State\r\n");
+
 	HAL_Delay(100); // Simulate boot process
+    printf("Initializing sensors and actuators \r\n");
 
-	// Transition to IDLE
-	systemState = IDLE;
+    handleButtonPress();
 
-	// Terminate the Boot Task
-	osThreadTerminate(NULL);
+    if (systemState == IDLE)
+    {
+      osThreadTerminate(NULL); // Terminate Boot Task after transition
+    }
+
+    osDelay(100);
 
   /* Infinite loop */
   for(;;)
   {
+
     osDelay(1);
   }
   /* USER CODE END StartBootTask */
@@ -435,18 +526,127 @@ void StartIdleTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-	    if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET) // Check USR_BTN
-	    {
-	      // Debounce
-	      HAL_Delay(50);
-	      if (HAL_GPIO_ReadPin(B1_GPIO_Port, B1_Pin) == GPIO_PIN_RESET)
+	  handleButtonPress();
+
+	      if (systemState == IDLE) // Idle state
 	      {
-	        systemState = TELEMETRY; // Transition to TELEMETRY
+	        printf("Idle State: All sensors and actuators initialized\r\n");
+	        StartUartTask(NULL); // Start UART task to send telemetry
 	      }
-	    }
-	    osDelay(100); // Poll button periodically
+
+	      if (systemState != IDLE) // Exit Idle state
+	      {
+	        osThreadTerminate(NULL); // Terminate Idle Task
+	      }
+
+	      osDelay(100);
+
+
   }
   /* USER CODE END StartIdleTask */
+}
+
+/* USER CODE BEGIN Header_StartAscentTask */
+/**
+* @brief Function implementing the ascentTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartAscentTask */
+void StartAscentTask(void *argument)
+{
+  /* USER CODE BEGIN StartAscentTask */
+  /* Infinite loop */
+  for(;;)
+  {
+	    handleButtonPress();
+
+	    if (systemState == ASCENT)
+	    {
+	      printf("Ascent Telemetry Data\r\n");
+	      osDelay(1000);
+	    }
+	    else
+	    {
+	      osDelay(100);
+	    }
+  }
+  /* USER CODE END StartAscentTask */
+}
+
+/* USER CODE BEGIN Header_StartDescentTask */
+/**
+* @brief Function implementing the descentTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartDescentTask */
+void StartDescentTask(void *argument)
+{
+  /* USER CODE BEGIN StartDescentTask */
+
+
+  /* Infinite loop */
+  for(;;)
+
+  {
+	    handleButtonPress();
+
+	    if (systemState == DESCENT)
+	    {
+	      // Simulate actions during descent
+	      HAL_UART_Transmit(&huart2, (uint8_t *)"Release drogue parachute\r\n", 26, HAL_MAX_DELAY);
+	      osDelay(2000);
+
+	      HAL_UART_Transmit(&huart2, (uint8_t *)"Payload ejection\r\n", 18, HAL_MAX_DELAY);
+	      osDelay(2000);
+
+	      HAL_UART_Transmit(&huart2, (uint8_t *)"Deploy main parachute\r\n", 24, HAL_MAX_DELAY);
+	      osDelay(2000);
+
+	      // Continue sending descent telemetry without waiting for actions
+	      while (systemState == DESCENT)
+	      {
+	        printf("Descent Telemetry Data\r\n");
+	        osDelay(1000); // Send telemetry every second
+	      }
+	    }
+	    else
+	    {
+	      osDelay(100);
+	    }
+  }
+  /* USER CODE END StartDescentTask */
+}
+
+/* USER CODE BEGIN Header_StartRecoveryTask */
+/**
+* @brief Function implementing the recoveryTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartRecoveryTask */
+void StartRecoveryTask(void *argument)
+{
+  /* USER CODE BEGIN StartRecoveryTask */
+  /* Infinite loop */
+  for(;;)
+  {
+	    handleButtonPress();
+
+	    if (systemState == RECOVERY)
+	    {
+	      HAL_UART_Transmit(&huart2, (uint8_t *)"Shortened Telemetry\r\n", 22, HAL_MAX_DELAY);
+
+	      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+	      osDelay(1000);
+	    }
+	    else
+	    {
+	      osDelay(100);
+	    }
+  }
+  /* USER CODE END StartRecoveryTask */
 }
 
 /**
