@@ -97,11 +97,15 @@ void StartIdleTask(void *argument);
 typedef enum {
     BOOT,
     IDLE,
-    TELEMETRY
+    TELEMETRY,
+    ASCENT,
+    DESCENT,
+    RECOVERY
 } SystemState_t;
 
-volatile SystemState_t systemState = BOOT; // Initial state
-
+volatile SystemState_t systemState = BOOT;
+volatile uint32_t buttonPressStartTime = 0;
+volatile uint8_t buttonPressCount = 0;
 
 
 int __io_putchar(int ch) {
